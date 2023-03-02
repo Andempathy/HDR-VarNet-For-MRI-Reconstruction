@@ -1,0 +1,15 @@
+h5py==3.7.0
+matplotlib==3.7.0
+numpy==1.24.1
+pandas==1.5.3
+pytorch_lightning==1.9.1
+PyYAML==6.0
+requests==2.28.2
+runstats==2.0.0
+scikit_image==0.19.3
+skimage==0.0
+torch==1.13.1
+torchmetrics==0.11.0
+tqdm==4.64.1
+
+# fastmri==0.2.1.dev11+g0c9fd54
