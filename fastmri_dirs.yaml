@@ -1,4 +1,5 @@
-default_root_dir: ./
-data_path: ./datasets
+default_root_dir: /root/HDR-VarNet-For-MRI-Reconstruction
+data_path: /root/autodl-tmp/brain_multicoil_batch_0
 brain_path: /path/to/brain
 knee_path: /path/to/knee
+tensorboard_dir: /root/tf-logs

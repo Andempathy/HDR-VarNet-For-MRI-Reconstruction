@@ -56,9 +56,10 @@ def cli_main(args):
         chans=args.chans,
         sens_pools=args.sens_pools,
         sens_chans=args.sens_chans,
+        warmup_epochs=args.warmup_epochs,
         lr=args.lr,
-        lr_step_size=args.lr_step_size,
-        lr_gamma=args.lr_gamma,
+        # lr_step_size=args.lr_step_size,
+        # lr_gamma=args.lr_gamma,
         weight_decay=args.weight_decay,
     )
 
@@ -93,7 +94,7 @@ def build_args():
     parser.add_argument(
         "--mask_type",
         choices=("random", "equispaced_fraction"),
-        default="equispaced_fraction",
+        default="random",
         type=str,
         help="Type of k-space mask",
     )
@@ -120,7 +121,7 @@ def build_args():
     parser = FastMriDataModule.add_data_specific_args(parser)
     parser.set_defaults(
         data_path=data_path,  # path to fastMRI data
-        mask_type="equispaced_fraction",  # VarNet uses equispaced mask
+        mask_type="random",  # VarNet uses equispaced mask
         challenge="multicoil",  # only multicoil implemented for VarNet
         batch_size=1,  # number of samples per batch
         num_workers=0,  # number of workers for PyTorch dataloader if 0 single
@@ -130,43 +131,50 @@ def build_args():
     # module config
     parser = ResidualVarNetModule.add_model_specific_args(parser)
     parser.set_defaults(
-        organize_type="residual",  # type of organization for VarNet blocks
-        backbone_type="attentionunet",  # type of backbone for VarNet
-        transform_type="fourier",  # type of transformation for K-Space
-        num_blocks=1,  # number of blocks for VarNet
+        organize_type="cascade",  # type of organization for VarNet blocks, such as cascade or recurrent
+        residual_type="add", # type of residual path between VarNet blocks, such as add, mean or none
+        backbone_type="unet",  # type of backbone for VarNet, such as unet,nestedunet,attentionunet,SwinUnet,RSTB
+        transform_type="fourier",  # type of transformation for K-Space, such as fourier, automap or direct
+        consistency_type="soft",  # type of data consistency for K-Space, such as soft, hard or none
+        num_blocks=3,  # number of blocks for VarNet
         pools=4,  # number of pooling layers for U-Net
         chans=18,  # number of top-level channels for U-Net
         sens_pools=4,  # number of pooling layers for sense est. U-Net
         sens_chans=8,  # number of top-level channels for sense est. U-Net
-        lr=0.003,  # Adam learning rate
-        lr_step_size=40,  # epoch at which to decrease learning rate
-        lr_gamma=0.1,  # extent to which to decrease learning rate
-        weight_decay=0.0,  # weight regularization strength
+        max_epochs=50,  # number of total epochs
+        warmup_epochs=3, # number of warmup epochs at beginning
+        lr=0.001,  # base learning rate in Adam or AdamW
+        # lr_step_size=40,  # epoch at which to decrease learning rate
+        # lr_gamma=0.1,  # extent to which to decrease learning rate
+        weight_decay=0.01,  # weight regularization strength
     )
 
     # trainer config
     default_root_dir = fetch_dir("default_root_dir", path_config)
     parser = pl.Trainer.add_argparse_args(parser)
     parser.set_defaults(
-        accelerator='cpu',
-        # gpus=0,  # number of gpus to use
+        accelerator='gpu',
+        # gpus=1,  # number of gpus to use
+        # precision=16, 
+        # amp_backend='apex',
+        # amp_level='02',
+        deterministic=True,  # makes things slower, but deterministic
         replace_sampler_ddp=False,  # this is necessary for volume dispatch during val
-        # precision='bf16', 
-        seed=42,  # random seed
-        # deterministic=True,  # makes things slower, but deterministic
         default_root_dir=default_root_dir,  # directory for logs and checkpoints
-        max_epochs=2,  # max number of epochs
+        max_epochs=50,  # max number of epochs
+        seed=42,  # random seed
     )
 
     args = parser.parse_args()
 
     # tensorboard config
-    tensorboard_dir = default_root_dir / "tensorboard"
+    # tensorboard_dir = default_root_dir / "tensorboard"
+    tensorboard_dir = fetch_dir("tensorboard_dir", path_config)
     if not tensorboard_dir.exists():
         tensorboard_dir.mkdir(parents=True)
     
-    args.logger = TensorBoardLogger(tensorboard_dir, name="myFuckingvarnet")
-    args.log_every_n_steps = 16
+    args.logger = TensorBoardLogger(tensorboard_dir, name="HDR-VarNet")
+    # args.log_every_n_steps = 16
 
     # checkpoint config
     checkpoint_dir = default_root_dir / "checkpoints"
@@ -190,7 +198,7 @@ def build_args():
     #         args.resume_from_checkpoint = str(ckpt_list[-1])
 
     args_dict = {key: str(value) for key, value in args.__dict__.items()}
-    with open(args.default_root_dir / "args_dict_test.yaml", "w") as f:
+    with open(args.default_root_dir / "args_dict.yaml", "w") as f:
         yaml.dump(args_dict, f)
 
     return args

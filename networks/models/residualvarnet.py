@@ -13,6 +13,7 @@ from .automap import AutoMap
 from .unet import Unet
 from .nestedunet import NestedUnet
 from .attentionunet import AttentionUnet
+from .swinunet import SwinUnet
 
 
 class NormUnet(nn.Module):
@@ -31,7 +32,7 @@ class NormUnet(nn.Module):
         in_chans: int = 2,
         out_chans: int = 2,
         drop_prob: float = 0.0,
-        type: str = "unet",
+        backbone_type: str = "unet",
     ):
         """
         Args:
@@ -42,8 +43,7 @@ class NormUnet(nn.Module):
             drop_prob: Dropout probability.
         """
         super().__init__()
-        # TODO: add unet++\unet+++ to backbone choice
-        if type == "unet":
+        if backbone_type == "unet":
             self.unet = Unet(
                 in_chans=in_chans,
                 out_chans=out_chans,
@@ -51,20 +51,27 @@ class NormUnet(nn.Module):
                 num_pool_layers=num_pools,
                 drop_prob=drop_prob,
             )
-        elif type == "nestedunet" or "unet++":
+        elif backbone_type == "nestedunet":
             self.unet = NestedUnet(
-                in_channel=in_chans,
-                out_channel=out_chans,
-                channel=chans,
+                in_chans=in_chans,
+                out_chans=out_chans,
+                chans=chans,
                 deepsupervision=False,
             )
-        elif type == "attentionunet" or "attentiongate":
+        elif backbone_type == "attentionunet":
             self.unet = AttentionUnet(
-                input_ch=in_chans,
-                output_ch=out_chans,
+                in_chans=in_chans,
+                out_chans=out_chans,
+                chans=chans,
+            )
+        elif backbone_type == "swinunet":
+            self.unet = SwinUnet(
+                in_chans=in_chans,
+                out_chans=out_chans,
+                chans=chans,
             )
         else:
-            raise ValueError(f"unrecognized type {type}")
+            raise ValueError(f"unrecognized type {backbone_type}")
 
     def complex_to_chan_dim(self, x: torch.Tensor) -> torch.Tensor:
         b, c, h, w, two = x.shape
@@ -246,9 +253,11 @@ class ResidualVarNet(nn.Module):
 
     def __init__(
         self,
-        organize_type: str = "residual",
+        organize_type: str = "cascade",
+        residual_type : str = "add",
         backbone_type: str = "unet",
         transform_type: str = "fourier",
+        consistency_type: str = "soft",
         num_blocks: int = 3,
         sens_chans: int = 8,
         sens_pools: int = 4,
@@ -259,8 +268,10 @@ class ResidualVarNet(nn.Module):
         """
         Args:
             organize_type: Type of blocks organization in variational network.
+            residual_type: Type of residual path between VarNet blocks.
             backbone_type: Type of backbone in variational network.
             transform_type: Type of transformation between kspace and reconstruction in variational network.
+            consistency_type: Type of data consistency for K-Space.
             num_blocks: Number of blocks in variational network.
             sens_chans: Number of channels for U-Net in sensitivity model.
             sens_pools: Number of downsampling and upsampling layers for U-Net in sensitivity model.
@@ -273,52 +284,29 @@ class ResidualVarNet(nn.Module):
         
         self.fft, self.ifft = self.get_transform_op(transform_type)
         
-        if organize_type == "recurrent":
-            recurrent_block = VarNetBlock(NormUnet(chans, pools, type=backbone_type), self.fft, self.ifft)
-            self.blocks = nn.ModuleList([recurrent_block for _ in range(num_blocks)])
+        # if organize_type == "recurrent":
+        #     recurrent_block = VarNetBlock(NormUnet(chans, pools, type=backbone_type), self.fft, self.ifft)
+        #     self.blocks = nn.ModuleList([recurrent_block for _ in range(num_blocks)])
+        # elif organize_type == "recurrentv2":
+        #     self.block = VarNetBlock(NormUnet(chans, pools, type=backbone_type), self.fft, self.ifft)
+        # else:
+        #     self.blocks = nn.ModuleList([VarNetBlock(NormUnet(chans, pools, type=backbone_type), self.fft, self.ifft) for _ in range(num_blocks)])
+
+        # if organize_type == "cascade" or "residual" or "residualv2" or "residualv3" or "residualv4":
+        # if organize_type == "cascade" or "residual_sum" or "residual_mean" or "residual_sum_inputless" or "residual_mean_inputless":
+        if organize_type == "cascade":
+            self.blocks = nn.ModuleList([VarNetBlock(
+                    NormUnet(chans, pools, backbone_type=backbone_type), self.fft, self.ifft, consistency_type=consistency_type
+                    ) for _ in range(num_blocks)])
+        elif organize_type == "recurrent":
+            self.block == VarNetBlock(NormUnet(chans, pools, backbone_type=backbone_type), self.fft, self.ifft, consistency_type=consistency_type)
         else:
-            self.blocks = nn.ModuleList([VarNetBlock(NormUnet(chans, pools, type=backbone_type), self.fft, self.ifft) for _ in range(num_blocks)])
+            raise ValueError(f"unrecognized type {organize_type}")
 
         self.organize_type = organize_type
+        self.residual_type = residual_type
 
-    def forward(
-        self,
-        masked_kspace: torch.Tensor,
-        mask: torch.Tensor,
-        num_low_frequencies: Optional[int] = None,  # 这个直接不传了，主打一个白兰
-    ) -> torch.Tensor:
-        
-        extra_outputs = defaultdict(list)
-
-        extra_outputs["masks"].append(mask.detach().cpu())
-
-        sens_maps = self.sens_net(masked_kspace, mask, num_low_frequencies)
-        extra_outputs["sense"].append(sens_maps.detach().cpu())
-        
-        kspace_pred = masked_kspace.clone()
-
-        current_recon = self.get_current_recon(kspace_pred, sens_maps)
-        extra_outputs["recons"].append(current_recon.detach().cpu())
-
-        for block in self.blocks:
-            if self.organize_type == "cascade":
-                kspace_pred = block(kspace_pred, masked_kspace, mask, sens_maps)
-            elif self.organize_type == "residual":
-                kspace_pred = torch.stack((block(kspace_pred, masked_kspace, mask, sens_maps), kspace_pred)).sum(dim=0)
-            elif self.organize_type == "dense":  # TODO: fix the dim. give up maybe.
-                kspace_pred = torch.cat([block(kspace_pred, masked_kspace, mask, sens_maps), kspace_pred], dim=0)
-            elif self.organize_type == "recurrent":  
-                kspace_pred = block(kspace_pred, masked_kspace, mask, sens_maps)
-            else:
-                raise ValueError(f"unrecognized type {self.organize_type}")
-
-            # TODO fix the current recons by set kspace_pred or masked_kspace
-            current_recon = self.get_current_recon(kspace_pred, sens_maps)
-            extra_outputs["recons"].append(current_recon.detach().cpu())
-
-        output = fastmri.rss(fastmri.complex_abs(self.ifft(kspace_pred)), dim=1)
-
-        return output, extra_outputs
+        self.num_blocks = num_blocks
 
     def get_transform_op(self, transform_type: str):
         if transform_type == "fourier":
@@ -326,15 +314,82 @@ class ResidualVarNet(nn.Module):
         elif transform_type == "automap":
             return AutoMap(mode="fft"), AutoMap(mode="ifft")
         elif transform_type == "direct":
-            return self.direct, self.direct
+            return nn.Identity, nn.Identity
         else:
             raise ValueError(f"unrecognized type {transform_type}")
 
-    def direct(self, x:torch.Tensor):
-        return x
+    # def get_current_recon(self, x: torch.Tensor, sens_maps: torch.Tensor):
+    #     return fastmri.complex_abs(fastmri.complex_mul(self.ifft(x), fastmri.complex_conj(sens_maps)).sum(dim=1, keepdim=True)).squeeze(1)
 
-    def get_current_recon(self, x: torch.Tensor, sens_maps: torch.Tensor):
-        return fastmri.complex_abs(fastmri.complex_mul(self.ifft(x), fastmri.complex_conj(sens_maps)).sum(dim=1, keepdim=True)).squeeze(1)
+    def forward(
+        self,
+        masked_kspace: torch.Tensor,
+        mask: torch.Tensor,
+        num_low_frequencies: Optional[int] = None,
+    ) -> torch.Tensor:
+        
+        # extra_outputs = defaultdict(list)
+        # extra_outputs["masks"].append(mask.detach().cpu())
+
+        sens_maps = self.sens_net(masked_kspace, mask, num_low_frequencies)
+        # extra_outputs["sense"].append(sens_maps.detach().cpu())
+        
+        # kspace_pred = masked_kspace.clone()
+        kspace_preds = [masked_kspace.clone()]
+        # current_recon = self.get_current_recon(kspace_pred, sens_maps)
+        # extra_outputs["recons"].append(current_recon.detach().cpu())
+        
+        for idx in range(self.num_blocks):
+            if self.organize_type == "cascade" and self.residual_type == "none":
+                kspace_preds.append(self.blocks[idx](kspace_preds[-1], masked_kspace, mask, sens_maps))
+            elif self.organize_type == "cascade" and self.residual_type == "add":
+                kspace_preds.append(torch.stack((self.blocks[idx](kspace_preds[-1], masked_kspace, mask, sens_maps), kspace_preds[-1])).sum(dim=0))
+            elif self.organize_type == "cascade" and self.residual_type == "mean":
+                kspace_preds.append(torch.stack((self.blocks[idx](kspace_preds[-1], masked_kspace, mask, sens_maps), kspace_preds[-1])).mean(dim=0))
+            
+            elif self.organize_type == "recurrent" and self.residual_type == "none":
+                kspace_preds.append(self.block(kspace_preds[-1], masked_kspace, mask, sens_maps))
+            elif self.organize_type == "recurrent" and self.residual_type == "add":
+                kspace_preds.append(torch.stack((self.block(kspace_preds[-1], masked_kspace, mask, sens_maps), kspace_preds[-1])).sum(dim=0))
+            elif self.organize_type == "recurrent" and self.residual_type == "mean":
+                kspace_preds.append(torch.stack((self.block(kspace_preds[-1], masked_kspace, mask, sens_maps), kspace_preds[-1])).mean(dim=0))
+
+            else:
+                raise ValueError(f"unrecognized types {self.organize_type, self.residual_type}")
+            
+        # for block in self.blocks:
+        #     if self.organize_type == "cascade":
+        #         kspace_pred = block(kspace_pred, masked_kspace, mask, sens_maps)
+        #     elif self.organize_type == "residual":
+        #         kspace_pred = torch.stack((block(kspace_pred, masked_kspace, mask, sens_maps), kspace_pred)).sum(dim=0)
+        #     elif self.organize_type == "residualv2":
+        #         kspace_pred = torch.stack((block(kspace_pred, masked_kspace, mask, sens_maps), kspace_pred)).mean(dim=0)
+        #     elif self.organize_type == "recurrent":  
+        #         kspace_pred = block(kspace_pred, masked_kspace, mask, sens_maps)
+        #     else:
+        #         raise ValueError(f"unrecognized type {self.organize_type}")
+        
+        # if self.organize_type == "recurrentv2":
+        #     for _ in range(self.num_blocks):
+        #         kspace_pred = torch.stack((self.block(kspace_pred, masked_kspace, mask, sens_maps), kspace_pred)).mean(dim=0)
+        
+        # if self.organize_type == "residualv3":
+        #     kspace_pred_0 = self.blocks[0](kspace_pred, masked_kspace, mask, sens_maps)
+        #     kspace_pred_1 = torch.stack((self.blocks[1](kspace_pred_0, masked_kspace, mask, sens_maps), kspace_pred_0)).sum(dim=0)
+        #     kspace_pred = torch.stack((self.blocks[2](kspace_pred_1, masked_kspace, mask, sens_maps), kspace_pred_1)).sum(dim=0)
+            
+        # if self.organize_type == "residualv4":
+        #     kspace_pred_0 = self.blocks[0](kspace_pred, masked_kspace, mask, sens_maps)
+        #     kspace_pred_1 = torch.stack((self.blocks[1](kspace_pred_0, masked_kspace, mask, sens_maps), kspace_pred_0)).mean(dim=0)
+        #     kspace_pred = torch.stack((self.blocks[2](kspace_pred_1, masked_kspace, mask, sens_maps), kspace_pred_1)).mean(dim=0)
+
+        # current_recon = self.get_current_recon(kspace_pred, sens_maps)
+        # extra_outputs["recons"].append(current_recon.detach().cpu())
+
+        output = fastmri.rss(fastmri.complex_abs(self.ifft(kspace_preds[-1])), dim=1)
+
+        # return output, extra_outputs
+        return output
 
 
 class VarNetBlock(nn.Module):
@@ -355,7 +410,14 @@ class VarNetBlock(nn.Module):
         self.model = model
         self.fft = fft
         self.ifft = ifft
-        self.consis_weight = nn.Parameter(torch.ones(1)) if consistency_type == "soft" else 1
+
+        # self.consis_weight = nn.Parameter(torch.ones(1)) if consistency_type == "soft" else 1
+        if consistency_type == "soft":
+            self.consis_weight = nn.Parameter(torch.ones(1))
+        elif consistency_type == "hard":
+            self.consis_weight == 1
+        elif consistency_type == "none":
+            self.consis_weight == 0
 
     def sens_expand(self, x: torch.Tensor, sens_maps: torch.Tensor) -> torch.Tensor:
         return self.fft(fastmri.complex_mul(x, sens_maps))

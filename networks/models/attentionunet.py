@@ -3,50 +3,49 @@
 import torch
 import torch.nn as nn
 
-class convBlock(nn.Module):
-    def __init__(self,ch_in,ch_out):
-        super(convBlock,self).__init__()
+class ConvBlock(nn.Module):
+    def __init__(self, in_chans, out_chans):
+        super(ConvBlock, self).__init__()
         self.conv = nn.Sequential(
-            nn.Conv2d(ch_in, ch_out, kernel_size=3,stride=1,padding=1,bias=True),
-            nn.BatchNorm2d(ch_out),
+            nn.Conv2d(in_chans, out_chans, 3, padding=1),
+            nn.BatchNorm2d(out_chans),
             nn.ReLU(inplace=True),
-            nn.Conv2d(ch_out, ch_out, kernel_size=3,stride=1,padding=1,bias=True),
-            nn.BatchNorm2d(ch_out),
+            nn.Conv2d(out_chans, out_chans, 3, padding=1),
+            nn.BatchNorm2d(out_chans),
             nn.ReLU(inplace=True)
         )
-    def forward(self,x):
-        x = self.conv(x)
-        return x
 
-class upConv(nn.Module):
-    def __init__(self,ch_in,ch_out):
-        super(upConv,self).__init__()
+    def forward(self, input):
+        return self.conv(input)
+
+class UpConv(nn.Module):
+    def __init__(self,in_chans,out_chans):
+        super(UpConv,self).__init__()
         self.up = nn.Sequential(
             nn.Upsample(scale_factor=2),
-            nn.Conv2d(ch_in,ch_out,kernel_size=3,stride=1,padding=1,bias=True),
-		    nn.BatchNorm2d(ch_out),
+            nn.Conv2d(in_chans, out_chans, 3, padding=1),
+		    nn.BatchNorm2d(out_chans),
 			nn.ReLU(inplace=True)
         )
 
     def forward(self,x):
-        x = self.up(x)
-        return x
+        return self.up(x)
 
 class AttentionBlock(nn.Module):
     def __init__(self, F_g, F_l, F_int):
         super(AttentionBlock, self).__init__()
         self.W_g = nn.Sequential(
-            nn.Conv2d(F_g, F_int, kernel_size=1, stride=1, padding=0, bias=True),
+            nn.Conv2d(F_g, F_int, kernel_size=1, stride=1, padding=0),
             nn.BatchNorm2d(F_int)
         )
 
         self.W_x = nn.Sequential(
-            nn.Conv2d(F_l, F_int, kernel_size=1, stride=1, padding=0, bias=True),
+            nn.Conv2d(F_l, F_int, kernel_size=1, stride=1, padding=0),
             nn.BatchNorm2d(F_int)
         )
 
         self.psi = nn.Sequential(
-            nn.Conv2d(F_int, 1, kernel_size=1, stride=1, padding=0, bias=True),
+            nn.Conv2d(F_int, 1, kernel_size=1, stride=1, padding=0),
             nn.BatchNorm2d(1),
             nn.Sigmoid()
         )
@@ -67,34 +66,34 @@ class AttentionBlock(nn.Module):
 
 
 class AttentionUnet(nn.Module):
-    def __init__(self, input_ch=2, output_ch=2):
+    def __init__(self, in_chans=2, out_chans=2, chans=18):
         super(AttentionUnet, self).__init__()
 
         self.Maxpool = nn.MaxPool2d(kernel_size=2, stride=2)
 
-        self.Conv1 = convBlock(ch_in=input_ch, ch_out=18)
-        self.Conv2 = convBlock(ch_in=18, ch_out=36)
-        self.Conv3 = convBlock(ch_in=36, ch_out=72)
-        self.Conv4 = convBlock(ch_in=72, ch_out=144)
-        self.Conv5 = convBlock(ch_in=144, ch_out=288)
+        self.Conv1 = ConvBlock(in_chans=in_chans, out_chans=chans)
+        self.Conv2 = ConvBlock(in_chans=chans, out_chans=chans*2)
+        self.Conv3 = ConvBlock(in_chans=chans*2, out_chans=chans*4)
+        self.Conv4 = ConvBlock(in_chans=chans*4, out_chans=chans*8)
+        self.Conv5 = ConvBlock(in_chans=chans*8, out_chans=chans*16)
 
-        self.Up5 = upConv(ch_in=288, ch_out=144)
-        self.Att5 = AttentionBlock(F_g=144, F_l=144, F_int=72)
-        self.Up_conv5 = convBlock(ch_in=288, ch_out=144)
+        self.Up5 = UpConv(in_chans=chans*16, out_chans=chans*8)
+        self.Att5 = AttentionBlock(F_g=chans*8, F_l=chans*8, F_int=chans*4)
+        self.Up_conv5 = ConvBlock(in_chans=chans*16, out_chans=chans*8)
 
-        self.Up4 = upConv(ch_in=144, ch_out=72)
-        self.Att4 = AttentionBlock(F_g=72, F_l=72, F_int=36)
-        self.Up_conv4 = convBlock(ch_in=144, ch_out=72)
+        self.Up4 = UpConv(in_chans=chans*8, out_chans=chans*4)
+        self.Att4 = AttentionBlock(F_g=chans*4, F_l=chans*4, F_int=chans*2)
+        self.Up_conv4 = ConvBlock(in_chans=chans*8, out_chans=chans*4)
 
-        self.Up3 = upConv(ch_in=72, ch_out=36)
-        self.Att3 = AttentionBlock(F_g=36, F_l=36, F_int=18)
-        self.Up_conv3 = convBlock(ch_in=72, ch_out=36)
+        self.Up3 = UpConv(in_chans=chans*4, out_chans=chans*2)
+        self.Att3 = AttentionBlock(F_g=chans*2, F_l=chans*2, F_int=chans)
+        self.Up_conv3 = ConvBlock(in_chans=chans*4, out_chans=chans*2)
 
-        self.Up2 = upConv(ch_in=36, ch_out=18)
-        self.Att2 = AttentionBlock(F_g=18, F_l=18, F_int=32)
-        self.Up_conv2 = convBlock(ch_in=36, ch_out=18)
+        self.Up2 = UpConv(in_chans=chans*2, out_chans=chans)
+        self.Att2 = AttentionBlock(F_g=chans, F_l=chans, F_int=chans//2)
+        self.Up_conv2 = ConvBlock(in_chans=chans*2, out_chans=chans)
 
-        self.Conv_1x1 = nn.Conv2d(18, output_ch, kernel_size=1, stride=1, padding=0)
+        self.Conv_1x1 = nn.Conv2d(chans, out_chans, kernel_size=1, stride=1, padding=0)
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):

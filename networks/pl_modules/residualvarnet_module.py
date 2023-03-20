@@ -1,6 +1,7 @@
 from argparse import ArgumentParser
 from collections import defaultdict
 
+import math
 import sys
 import torch
 import numpy as np
@@ -23,25 +24,31 @@ class ResidualVarNetModule(MriModule):
 
     def __init__(
         self,
-        organize_type: str = "residual",
+        organize_type: str = "cascade",
+        residual_type : str = "add",
         backbone_type: str = "unet",
         transform_type: str = "fourier",
+        consistency_type: str = "soft",
         num_blocks: int = 3,
         pools: int = 4,
         chans: int = 18,
         sens_pools: int = 4,
         sens_chans: int = 8,
-        lr: float = 0.001,
-        lr_step_size: int = 40,
-        lr_gamma: float = 0.1,
+        lr: float = 0.01,
+        # lr_step_size: int = 40,
+        # lr_gamma: float = 0.1,
         weight_decay: float = 0.0,
+        max_epochs: int = 50,
+        warmup_epochs: int = 3,
         **kwargs,
     ):
         """
         Args:
             organize_type: Type of blocks organization in variational network.
+            residual_type: Type of residual path between VarNet blocks.
             backbone_type: Type of backbone in variational network.
             transform_type: Type of transformation between kspace and reconstruction in variational network.
+            consistency_type: Type of data consistency for K-Space.
             num_blocks: Number of blocks in variational network.
             pools: Number of downsampling and upsampling layers for U-Net in blocks.
             chans: Number of channels for U-Net in blocks.
@@ -65,17 +72,21 @@ class ResidualVarNetModule(MriModule):
         self.save_hyperparameters()
 
         self.organize_type = organize_type
+        self.residual_type = residual_type
         self.backbone_type = backbone_type
         self.transfrom_type = transform_type
+        self.consistency_type = consistency_type
         self.num_blocks = num_blocks
         self.pools = pools
         self.chans = chans
         self.sens_pools = sens_pools
         self.sens_chans = sens_chans
         self.lr = lr
-        self.lr_step_size = lr_step_size
-        self.lr_gamma = lr_gamma
+        # self.lr_step_size = lr_step_size
+        # self.lr_gamma = lr_gamma
         self.weight_decay = weight_decay
+        self.max_epochs = max_epochs
+        self.warmup_epochs = warmup_epochs
 
         self.TrainNMSE = DistributedMetricSum()
         self.TrainSSIM = DistributedMetricSum()
@@ -97,8 +108,10 @@ class ResidualVarNetModule(MriModule):
 
         self.varnet = ResidualVarNet(
             organize_type=self.organize_type,
+            residual_type=self.residual_type,
             backbone_type=self.backbone_type,
             transform_type=self.transfrom_type,
+            consistency_type=self.consistency_type,
             num_blocks=self.num_blocks,
             sens_chans=self.sens_chans,
             sens_pools=self.sens_pools,
@@ -112,11 +125,14 @@ class ResidualVarNetModule(MriModule):
         return self.varnet(masked_kspace, mask)
                         
     def training_step(self, batch, batch_idx):
-        output, extra_outputs = self(batch.masked_kspace, batch.mask)
+        # output, extra_outputs = self(batch.masked_kspace, batch.mask)
+        output = self(batch.masked_kspace, batch.mask)
 
         target, output = transforms.center_crop_to_smallest(batch.target, output)
         loss = self.loss(output.unsqueeze(1), target.unsqueeze(1), data_range=batch.max_value)
-        self.log("train_loss", loss)
+        # self.log("training_loss", loss)
+        # lr = self.optimizer.state_dict()['param_groups'][0]['lr']
+        # self.log("learning_rate", lr)
 
         return {
             "batch_idx": batch_idx,
@@ -126,7 +142,8 @@ class ResidualVarNetModule(MriModule):
             "output": output,
             "target": target,
             "loss": loss,
-            "extra_outputs": extra_outputs,
+            # "lr": lr,
+            # "extra_outputs": extra_outputs,
         }
 
     def training_step_end(self, train_logs):
@@ -139,7 +156,8 @@ class ResidualVarNetModule(MriModule):
             "output",
             "target",
             "loss",
-            "extra_outputs",
+            # "lr",
+            # "extra_outputs",
         ):
             if k not in train_logs.keys():
                 raise RuntimeError(
@@ -248,18 +266,19 @@ class ResidualVarNetModule(MriModule):
             torch.tensor(len(losses), dtype=torch.float)
         )
 
-        self.log("training_loss", train_loss / tot_slice_examples, prog_bar=True)
+        self.log("learning_rate", self.optimizer.state_dict()['param_groups'][0]['lr'], prog_bar=True)
+        self.log("train_loss", train_loss / tot_slice_examples, prog_bar=True)
         for metric, value in metrics.items():
-            self.log(f"train_metrics/{metric}", value / tot_examples)
+            self.log(f"train_metrics/{metric}", value / tot_examples, prog_bar=True)
 
     def validation_step(self, batch, batch_idx):
-        batch: VarNetSample
-
-        output, extra_outputs = self.forward(batch.masked_kspace, batch.mask)
+        # batch: VarNetSample
+        # output, extra_outputs = self.forward(batch.masked_kspace, batch.mask)
+        output = self.forward(batch.masked_kspace, batch.mask)
 
         target, output = transforms.center_crop_to_smallest(batch.target, output)
         loss = self.loss(output.unsqueeze(1), target.unsqueeze(1), data_range=batch.max_value)
-        self.log("val_loss", loss)
+        # self.log("val_loss", loss)
 
         return {
             "batch_idx": batch_idx,
@@ -269,7 +288,7 @@ class ResidualVarNetModule(MriModule):
             "output": output,
             "target": target,
             "val_loss": loss,
-            "extra_outputs": extra_outputs,
+            # "extra_outputs": extra_outputs,
         }
 
     def validation_step_end(self, val_logs):
@@ -419,10 +438,11 @@ class ResidualVarNetModule(MriModule):
 
         self.log("validation_loss", val_loss / tot_slice_examples, prog_bar=True)
         for metric, value in metrics.items():
-            self.log(f"val_metrics/{metric}", value / tot_examples)
+            self.log(f"val_metrics/{metric}", value / tot_examples, prog_bar=True)
 
     def test_step(self, batch, batch_idx):
-        output, extra_outputs = self(batch.masked_kspace, batch.mask)
+        # output, extra_outputs = self(batch.masked_kspace, batch.mask)
+        output = self(batch.masked_kspace, batch.mask)
 
         # check for FLAIR 203
         if output.shape[-1] < batch.crop_size[1]:
@@ -439,11 +459,18 @@ class ResidualVarNetModule(MriModule):
         }
 
     def configure_optimizers(self):
-        self.optim = torch.optim.Adam(
+        # self.optim = torch.optim.Adam(
+        #     self.parameters(), lr=self.lr, weight_decay=self.weight_decay
+        # )
+        self.optim = torch.optim.AdamW(
             self.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
-        scheduler = torch.optim.lr_scheduler.StepLR(
-            self.optim, self.lr_step_size, self.lr_gamma
+        # scheduler = torch.optim.lr_scheduler.StepLR(
+        #     self.optim, self.lr_step_size, self.lr_gamma
+        # )
+        cosinelr_warmup = lambda epoch: epoch / self.warmup_epochs if epoch <= self.warmup_epochs else 0.5 * (math.cos((epoch - self.warmup_epochs) /(self.max_epochs - self.warmup_epochs) * math.pi) + 1)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            self.optim, lr_lambda=cosinelr_warmup
         )
 
         return [self.optim], [scheduler]
@@ -492,25 +519,31 @@ class ResidualVarNetModule(MriModule):
 
         # training params (opt)
         parser.add_argument(
-            "--lr", default=0.001, type=float, help="Adam learning rate"
+            "--max_epochs", default=50, type=int, help="Number of total epochs"
         )
         parser.add_argument(
-            "--lr_step_size",
-            default=40,
-            type=int,
-            help="Epoch at which to decrease step size",
+            "--warmup_epochs", default=3, type=int, help="Number of warmup epochs at beginning"
         )
         parser.add_argument(
-            "--lr_gamma",
-            default=0.1,
-            type=float,
-            help="Extent to which step size should be decreased",
+            "--lr", default=0.001, type=float, help="Learning rate in Adam or AdamW"
         )
+        # parser.add_argument(
+        #     "--lr_step_size",
+        #     default=40,
+        #     type=int,
+        #     help="Epoch at which to decrease step size if stepLR",
+        # )
+        # parser.add_argument(
+        #     "--lr_gamma",
+        #     default=0.1,
+        #     type=float,
+        #     help="Extent to which step size should be decreased",
+        # )
         parser.add_argument(
             "--weight_decay",
-            default=0.0,
+            default=0.01,
             type=float,
-            help="Strength of weight decay regularization",
+            help="Strength of weight decay regularization in Adam or AdamW",
         )
 
         return parser
